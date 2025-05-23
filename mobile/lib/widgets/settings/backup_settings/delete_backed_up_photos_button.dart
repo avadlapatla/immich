@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:easy_localization/easy_localization.dart';
@@ -134,13 +135,62 @@ class DeleteBackedUpPhotosButton extends HookConsumerWidget {
       }
     }
 
+    // Process deletion in batches to avoid blocking the UI
+    Future<Map<String, dynamic>> processDeletion(Map<String, dynamic> params) async {
+      final List<String> assetIds = params['assetIds'];
+      final int batchSize = params['batchSize'];
+      final Function(int, double) updateProgress = params['updateProgress'];
+      final backupService = params['backupService'];
+      
+      int totalDeleted = 0;
+      
+      for (int i = 0; i < assetIds.length; i += batchSize) {
+        final int end = (i + batchSize < assetIds.length) ? i + batchSize : assetIds.length;
+        final batch = assetIds.sublist(i, end);
+        
+        try {
+          // Delete batch directly
+          final batchResult = await backupService.deleteBackedUpAssetsFromDevice(batch);
+          
+          if (batchResult['success']) {
+            totalDeleted += (batchResult['count'] as num).toInt();
+            
+            // Update progress less frequently for better performance
+            if (i % (batchSize * 2) == 0 || end == assetIds.length) {
+              updateProgress(totalDeleted, totalDeleted / assetIds.length);
+            }
+          }
+        } catch (e) {
+          // Log error but continue with next batch
+          log.warning('Error deleting batch: $e');
+        }
+        
+        // Small delay to allow UI to breathe
+        await Future.delayed(const Duration(milliseconds: 10));
+      }
+      
+      return {
+        'success': true,
+        'count': totalDeleted,
+        'message': 'Successfully deleted $totalDeleted assets',
+      };
+    }
+    
+    // Calculate optimal batch size based on total count
+    int calculateBatchSize(int totalCount) {
+      if (totalCount < 100) return 20;
+      if (totalCount < 500) return 50;
+      if (totalCount < 2000) return 100;
+      return 200; // For very large collections
+    }
+
     Future<void> deleteBackedUpPhotos() async {
       try {
         isLoading.value = true;
         deletionProgress.value = null;
         deletedCount.value = 0;
         
-        // Get backed-up assets
+        // Get backed-up assets with pagination if needed
         final backedUpAssets = await backupService.getBackedUpAssetsForDeletion();
         final dynamic rawCount = backedUpAssets['count'];
         final int count = (rawCount as num).toInt();
@@ -161,37 +211,43 @@ class DeleteBackedUpPhotosButton extends HookConsumerWidget {
         final shouldDelete = await showDeleteConfirmationDialog(count);
         
         if (shouldDelete == true) {
-          // For large batches, process in smaller chunks to show progress
-          if (assetIds.length > 20) {
-            const int batchSize = 20;
-            int totalDeleted = 0;
+          // Use a timer to throttle UI updates
+          Timer? progressUpdateTimer;
+          int currentDeleted = 0;
+          double currentProgress = 0.0;
+          
+          // Function to update progress with throttling
+          void updateProgress(int deleted, double progress) {
+            currentDeleted = deleted;
+            currentProgress = progress;
             
-            for (int i = 0; i < assetIds.length; i += batchSize) {
-              final int end = (i + batchSize < assetIds.length) ? i + batchSize : assetIds.length;
-              final batch = assetIds.sublist(i, end);
-              
-              // Delete batch
-              final batchResult = await backupService.deleteBackedUpAssetsFromDevice(batch);
-              
-              if (batchResult['success']) {
-                totalDeleted += (batchResult['count'] as num).toInt();
-                deletedCount.value = totalDeleted;
-                deletionProgress.value = totalDeleted / assetIds.length;
-              } else {
-                log.warning('Error deleting batch: ${batchResult['message']}');
-              }
+            if (progressUpdateTimer == null || !progressUpdateTimer!.isActive) {
+              progressUpdateTimer = Timer(const Duration(milliseconds: 100), () {
+                deletedCount.value = currentDeleted;
+                deletionProgress.value = currentProgress;
+              });
             }
-            
-            await showResultDialog({
-              'success': true,
-              'count': totalDeleted,
-              'message': 'Successfully deleted $totalDeleted assets',
-            });
-          } else {
-            // For smaller batches, delete all at once
-            final result = await backupService.deleteBackedUpAssetsFromDevice(assetIds);
-            await showResultDialog(result);
           }
+          
+          // Calculate optimal batch size based on total count
+          final batchSize = calculateBatchSize(assetIds.length);
+          
+          // Process deletion in batches
+          final result = await processDeletion({
+            'assetIds': assetIds,
+            'batchSize': batchSize,
+            'backupService': backupService,
+            'updateProgress': updateProgress,
+          });
+          
+          // Cancel timer if it's still active
+          progressUpdateTimer?.cancel();
+          
+          // Ensure final progress is shown
+          deletedCount.value = (result['count'] as int);
+          deletionProgress.value = assetIds.isEmpty ? 0 : (result['count'] as int) / assetIds.length;
+          
+          await showResultDialog(result);
         }
       } catch (e) {
         log.severe('Error deleting backed up photos: ${e.toString()}');

@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/exif.model.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
@@ -78,24 +79,66 @@ class AssetMediaRepository implements IAssetMediaRepository {
     final Map<String, bool> result = {};
     
     // Process in batches to avoid overloading the system
-    const int batchSize = 50;
+    // Use a larger batch size for better performance with large collections
+    final int batchSize = _calculateOptimalBatchSize(ids.length);
+    
     for (int i = 0; i < ids.length; i += batchSize) {
       final int end = (i + batchSize < ids.length) ? i + batchSize : ids.length;
       final batch = ids.sublist(i, end);
       
-      await Future.wait(
-        batch.map((id) async {
-          try {
-            final entity = await AssetEntity.fromId(id);
-            result[id] = entity != null;
-          } catch (e) {
-            _log.warning('Error checking if asset exists: ${e.toString()}');
-            result[id] = false;
-          }
-        }),
-      );
+      try {
+        // Use compute to move this work to a separate isolate for better UI responsiveness
+        final batchResults = await compute(_checkExistenceBatch, batch);
+        result.addAll(batchResults);
+      } catch (e) {
+        // If compute fails (e.g., on older devices), fall back to the previous implementation
+        _log.warning('Failed to use compute for existence check, falling back: ${e.toString()}');
+        
+        await Future.wait(
+          batch.map((id) async {
+            try {
+              final entity = await AssetEntity.fromId(id);
+              result[id] = entity != null;
+            } catch (e) {
+              _log.warning('Error checking if asset exists: ${e.toString()}');
+              result[id] = false;
+            }
+          }),
+        );
+      }
+      
+      // Allow UI to update between batches
+      await Future.delayed(const Duration(milliseconds: 1));
     }
     
     return result;
+  }
+  
+  // Static method to be called in compute isolate
+  static Future<Map<String, bool>> _checkExistenceBatch(List<String> batch) async {
+    final Map<String, bool> results = {};
+    
+    await Future.wait(
+      batch.map((id) async {
+        try {
+          final entity = await AssetEntity.fromId(id);
+          results[id] = entity != null;
+        } catch (e) {
+          // Use a static logger since we're in a static method
+          Logger('AssetMediaRepository').warning('Error checking if asset exists: $e');
+          results[id] = false;
+        }
+      }),
+    );
+    
+    return results;
+  }
+  
+  // Calculate optimal batch size based on total count
+  int _calculateOptimalBatchSize(int totalCount) {
+    if (totalCount < 100) return 50;
+    if (totalCount < 500) return 100;
+    if (totalCount < 2000) return 200;
+    return 300; // For very large collections
   }
 }

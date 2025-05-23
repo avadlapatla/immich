@@ -69,6 +69,7 @@ class BackupService {
 
   /// Get a list of backed-up assets that can be deleted from the device
   /// Returns a map with the count of assets and the list of asset IDs
+  /// Uses pagination to handle large asset collections efficiently
   Future<Map<String, dynamic>> getBackedUpAssetsForDeletion() async {
     final String deviceId = Store.get(StoreKey.deviceId);
     final List<String> backedUpAssetIds = [];
@@ -79,14 +80,25 @@ class BackupService {
       final deviceAssets = await _apiService.assetsApi.getAllUserAssetsByDeviceId(deviceId);
       
       if (deviceAssets != null && deviceAssets.isNotEmpty) {
-        // Check which assets still exist on the device using batch operation
-        final existenceMap = await _assetMediaRepository.existsAll(deviceAssets);
+        // Process in batches to avoid memory issues with large collections
+        const int batchSize = 500;
         
-        // Filter assets that exist on the device
-        for (final assetId in deviceAssets) {
-          if (existenceMap[assetId] == true) {
-            backedUpAssetIds.add(assetId);
+        for (int i = 0; i < deviceAssets.length; i += batchSize) {
+          final int end = (i + batchSize < deviceAssets.length) ? i + batchSize : deviceAssets.length;
+          final batch = deviceAssets.sublist(i, end);
+          
+          // Check which assets still exist on the device using batch operation
+          final existenceMap = await _assetMediaRepository.existsAll(batch);
+          
+          // Filter assets that exist on the device
+          for (final assetId in batch) {
+            if (existenceMap[assetId] == true) {
+              backedUpAssetIds.add(assetId);
+            }
           }
+          
+          // Allow UI to update between batches
+          await Future.delayed(const Duration(milliseconds: 1));
         }
         
         count = backedUpAssetIds.length;
@@ -118,6 +130,36 @@ class BackupService {
 
       // Delete assets from the device
       final deletedIds = await _assetMediaRepository.deleteAll(assetIds);
+      
+      if (deletedIds.isNotEmpty) {
+        // Update the database to reflect that these assets are now remote-only
+        try {
+          // Get all assets that have both local and remote IDs (merged state)
+          final allMergedAssets = await _assetRepository.getAll(
+            ownerId: Store.get(StoreKey.currentUser).id,
+            state: AssetState.merged,
+          );
+          
+          // Filter to find assets that match the deleted local IDs
+          final assetsToUpdate = allMergedAssets
+              .where((asset) => deletedIds.contains(asset.localId))
+              .toList();
+          
+          // Update the assets to set localId to null (making them remote-only)
+          final updatedAssets = assetsToUpdate.map((asset) {
+            return asset.copyWith(localId: null);
+          }).toList();
+          
+          // Save the updated assets to the database
+          if (updatedAssets.isNotEmpty) {
+            await _assetRepository.updateAll(updatedAssets);
+            _log.info('Updated ${updatedAssets.length} assets to remote-only state');
+          }
+        } catch (dbError) {
+          _log.warning('Error updating asset database after deletion: ${dbError.toString()}');
+          // Continue with the operation even if database update fails
+        }
+      }
       
       return {
         'success': true,
