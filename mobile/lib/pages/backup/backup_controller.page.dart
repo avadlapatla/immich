@@ -18,6 +18,7 @@ import 'package:immich_mobile/providers/websocket.provider.dart';
 import 'package:immich_mobile/routing/router.dart';
 import 'package:immich_mobile/widgets/backup/backup_info_card.dart';
 import 'package:immich_mobile/widgets/backup/current_backup_asset_info_box.dart';
+import 'package:immich_mobile/widgets/settings/backup_settings/delete_backed_up_photos_button.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 @RoutePage()
@@ -333,6 +334,8 @@ class BackupControllerPage extends HookConsumerWidget {
                       const CurrentUploadingAssetInfoBox(),
                       if (!hasExclusiveAccess) buildBackgroundBackupInfo(),
                       buildBackupButton(),
+                      const SizedBox(height: 16),
+                      const DeleteBackedUpPhotosButton(),
                     ]
                   : [
                       buildFolderSelectionTile(),

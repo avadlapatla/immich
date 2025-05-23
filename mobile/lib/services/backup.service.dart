@@ -67,6 +67,73 @@ class BackupService {
     this._assetMediaRepository,
   );
 
+  /// Get a list of backed-up assets that can be deleted from the device
+  /// Returns a map with the count of assets and the list of asset IDs
+  Future<Map<String, dynamic>> getBackedUpAssetsForDeletion() async {
+    final String deviceId = Store.get(StoreKey.deviceId);
+    final List<String> backedUpAssetIds = [];
+    int count = 0;
+
+    try {
+      // Get all assets backed up from this device
+      final deviceAssets = await _apiService.assetsApi.getAllUserAssetsByDeviceId(deviceId);
+      
+      if (deviceAssets != null && deviceAssets.isNotEmpty) {
+        // Check which assets still exist on the device using batch operation
+        final existenceMap = await _assetMediaRepository.existsAll(deviceAssets);
+        
+        // Filter assets that exist on the device
+        for (final assetId in deviceAssets) {
+          if (existenceMap[assetId] == true) {
+            backedUpAssetIds.add(assetId);
+          }
+        }
+        
+        count = backedUpAssetIds.length;
+      }
+
+      return {
+        'count': count,
+        'assetIds': backedUpAssetIds,
+      };
+    } catch (e) {
+      _log.severe('Error [getBackedUpAssetsForDeletion] ${e.toString()}');
+      return {
+        'count': 0,
+        'assetIds': [],
+      };
+    }
+  }
+
+  /// Delete backed-up assets from the device
+  Future<Map<String, dynamic>> deleteBackedUpAssetsFromDevice(List<String> assetIds) async {
+    try {
+      if (assetIds.isEmpty) {
+        return {
+          'success': false,
+          'count': 0,
+          'message': 'No assets to delete',
+        };
+      }
+
+      // Delete assets from the device
+      final deletedIds = await _assetMediaRepository.deleteAll(assetIds);
+      
+      return {
+        'success': true,
+        'count': deletedIds.length,
+        'message': 'Successfully deleted ${deletedIds.length} assets',
+      };
+    } catch (e) {
+      _log.severe('Error [deleteBackedUpAssetsFromDevice] ${e.toString()}');
+      return {
+        'success': false,
+        'count': 0,
+        'message': 'Failed to delete assets: ${e.toString()}',
+      };
+    }
+  }
+
   Future<List<String>?> getDeviceBackupAsset() async {
     final String deviceId = Store.get(StoreKey.deviceId);
 

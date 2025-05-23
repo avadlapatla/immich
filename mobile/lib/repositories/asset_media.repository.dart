@@ -6,10 +6,12 @@ import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/interfaces/asset_media.interface.dart';
 import 'package:immich_mobile/utils/hash.dart';
 import 'package:photo_manager/photo_manager.dart' hide AssetType;
+import 'package:logging/logging.dart';
 
 final assetMediaRepositoryProvider = Provider((ref) => AssetMediaRepository());
 
 class AssetMediaRepository implements IAssetMediaRepository {
+  final Logger _log = Logger("AssetMediaRepository");
   @override
   Future<List<String>> deleteAll(List<String> ids) =>
       PhotoManager.editor.deleteWithIds(ids);
@@ -58,5 +60,42 @@ class AssetMediaRepository implements IAssetMediaRepository {
     // titleAsync gets the correct original filename for some assets on iOS
     // otherwise using the `entity.title` would return a random GUID
     return await entity.titleAsync;
+  }
+
+  @override
+  Future<bool> exists(String id) async {
+    try {
+      final entity = await AssetEntity.fromId(id);
+      return entity != null;
+    } catch (e) {
+      _log.warning('Error checking if asset exists: ${e.toString()}');
+      return false;
+    }
+  }
+
+  @override
+  Future<Map<String, bool>> existsAll(List<String> ids) async {
+    final Map<String, bool> result = {};
+    
+    // Process in batches to avoid overloading the system
+    const int batchSize = 50;
+    for (int i = 0; i < ids.length; i += batchSize) {
+      final int end = (i + batchSize < ids.length) ? i + batchSize : ids.length;
+      final batch = ids.sublist(i, end);
+      
+      await Future.wait(
+        batch.map((id) async {
+          try {
+            final entity = await AssetEntity.fromId(id);
+            result[id] = entity != null;
+          } catch (e) {
+            _log.warning('Error checking if asset exists: ${e.toString()}');
+            result[id] = false;
+          }
+        }),
+      );
+    }
+    
+    return result;
   }
 }
