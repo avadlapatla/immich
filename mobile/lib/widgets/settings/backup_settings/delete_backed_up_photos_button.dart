@@ -26,8 +26,10 @@ class DeleteBackedUpPhotosButton extends HookConsumerWidget {
     final deviceName = Platform.isIOS ? 'iPhone' : 'device';
     final Logger log = Logger("DeleteBackedUpPhotosButton");
 
-    // Disable the button during backup
-    final bool isBackupInProgress = backupState.backupProgress != BackUpProgressEnum.idle;
+    // Disable the button only during active backup processes
+    final bool isBackupInProgress = backupState.backupProgress == BackUpProgressEnum.inProgress || 
+                                   backupState.backupProgress == BackUpProgressEnum.inBackground ||
+                                   backupState.backupProgress == BackUpProgressEnum.manualInProgress;
 
     Future<bool?> showDeleteConfirmationDialog(int count) async {
       return showDialog<bool?>(
