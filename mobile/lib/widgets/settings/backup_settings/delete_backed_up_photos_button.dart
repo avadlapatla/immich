@@ -6,8 +6,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/models/backup/backup_state.model.dart';
+import 'package:immich_mobile/providers/asset.provider.dart';
 import 'package:immich_mobile/providers/backup/backup.provider.dart';
 import 'package:immich_mobile/services/backup.service.dart';
+import 'package:immich_mobile/widgets/common/immich_toast.dart';
 import 'package:immich_mobile/widgets/settings/settings_button_list_tile.dart';
 import 'package:logging/logging.dart';
 
@@ -190,6 +192,17 @@ class DeleteBackedUpPhotosButton extends HookConsumerWidget {
         deletionProgress.value = null;
         deletedCount.value = 0;
         
+        // Check if device is online
+        final isOnline = await backupService.isOnline();
+        if (!isOnline) {
+          ImmichToast.show(
+            context: context,
+            msg: 'Cannot delete photos while offline. Please connect to the internet and try again.',
+            toastType: ToastType.error,
+          );
+          return;
+        }
+        
         // Get backed-up assets with pagination if needed
         final backedUpAssets = await backupService.getBackedUpAssetsForDeletion();
         final dynamic rawCount = backedUpAssets['count'];
@@ -247,7 +260,14 @@ class DeleteBackedUpPhotosButton extends HookConsumerWidget {
           deletedCount.value = (result['count'] as int);
           deletionProgress.value = assetIds.isEmpty ? 0 : (result['count'] as int) / assetIds.length;
           
+          // Show result dialog
           await showResultDialog(result);
+          
+          // Refresh the asset list to reflect changes
+          if (result['success'] && result['count'] > 0) {
+            // Refresh the asset provider to update the UI
+            ref.read(assetProvider.notifier).getAllAsset();
+          }
         }
       } catch (e) {
         log.severe('Error deleting backed up photos: ${e.toString()}');

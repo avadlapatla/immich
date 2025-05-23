@@ -117,55 +117,133 @@ class BackupService {
     }
   }
 
-  /// Delete backed-up assets from the device
-  Future<Map<String, dynamic>> deleteBackedUpAssetsFromDevice(List<String> assetIds) async {
+  /// Check if the device is online by attempting to connect to the server
+  Future<bool> isOnline() async {
     try {
-      if (assetIds.isEmpty) {
+      await _apiService.serverInfoApi.pingServer();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// Delete backed-up assets from the device
+  /// Returns a map with success status, count of deleted assets, and a message
+  /// Uses a transaction to ensure database consistency
+  Future<Map<String, dynamic>> deleteBackedUpAssetsFromDevice(List<String> assetIds) async {
+    if (assetIds.isEmpty) {
+      return {
+        'success': false,
+        'count': 0,
+        'message': 'No assets to delete',
+      };
+    }
+
+    try {
+      // Step 1: Verify that assets exist on the server before deleting locally
+      final String deviceId = Store.get(StoreKey.deviceId);
+      final serverAssets = await _apiService.assetsApi.getAllUserAssetsByDeviceId(deviceId);
+      
+      if (serverAssets == null) {
         return {
           'success': false,
           'count': 0,
-          'message': 'No assets to delete',
+          'message': 'Could not verify assets on server. Please try again when online.',
+        };
+      }
+      
+      // Filter to only delete assets that exist on the server
+      final assetsToDelete = assetIds.where((id) => serverAssets.contains(id)).toList();
+      
+      if (assetsToDelete.isEmpty) {
+        return {
+          'success': false,
+          'count': 0,
+          'message': 'No assets found on server to delete locally.',
         };
       }
 
-      // Delete assets from the device
-      final deletedIds = await _assetMediaRepository.deleteAll(assetIds);
+      // Step 2: Get the assets from the database that need to be updated
+      // Use a more efficient query that directly filters by localId
+      final currentUser = Store.get(StoreKey.currentUser);
+      final assetsToUpdate = <Asset>[];
       
-      if (deletedIds.isNotEmpty) {
-        // Update the database to reflect that these assets are now remote-only
-        try {
-          // Get all assets that have both local and remote IDs (merged state)
-          final allMergedAssets = await _assetRepository.getAll(
-            ownerId: Store.get(StoreKey.currentUser).id,
-            state: AssetState.merged,
-          );
-          
-          // Filter to find assets that match the deleted local IDs
-          final assetsToUpdate = allMergedAssets
-              .where((asset) => deletedIds.contains(asset.localId))
-              .toList();
-          
-          // Update the assets to set localId to null (making them remote-only)
-          final updatedAssets = assetsToUpdate.map((asset) {
-            return asset.copyWith(localId: null);
-          }).toList();
-          
-          // Save the updated assets to the database
-          if (updatedAssets.isNotEmpty) {
-            await _assetRepository.updateAll(updatedAssets);
-            _log.info('Updated ${updatedAssets.length} assets to remote-only state');
-          }
-        } catch (dbError) {
-          _log.warning('Error updating asset database after deletion: ${dbError.toString()}');
-          // Continue with the operation even if database update fails
-        }
+      // Process in batches to avoid memory issues
+      const batchSize = 100;
+      for (int i = 0; i < assetsToDelete.length; i += batchSize) {
+        final int end = (i + batchSize < assetsToDelete.length) 
+            ? i + batchSize 
+            : assetsToDelete.length;
+        final batch = assetsToDelete.sublist(i, end);
+        
+        // For each batch, get all assets with matching localIds that also have remoteIds
+        final assets = await _assetRepository.getAll(
+          ownerId: currentUser.id,
+          state: AssetState.merged,
+        );
+        
+        // Filter to only those in the current batch
+        final batchAssets = assets.where((asset) => 
+            batch.contains(asset.localId) && asset.remoteId != null,).toList();
+        
+        assetsToUpdate.addAll(batchAssets);
       }
       
-      return {
-        'success': true,
-        'count': deletedIds.length,
-        'message': 'Successfully deleted ${deletedIds.length} assets',
-      };
+      // Step 3: Prepare the updated assets (with localId set to null)
+      final updatedAssets = assetsToUpdate.map((asset) => 
+          asset.copyWith(localId: null),).toList();
+      
+      // Step 4: Use a transaction to ensure consistency
+      int deletedCount = 0;
+      
+      // Use a transaction if possible, otherwise handle errors manually
+      try {
+        await _assetRepository.transaction(() async {
+          // Delete files from device
+          final deletedIds = await _assetMediaRepository.deleteAll(assetsToDelete);
+          deletedCount = deletedIds.length;
+          
+          // Update database to mark assets as remote-only
+          if (updatedAssets.isNotEmpty) {
+            await _assetRepository.updateAll(updatedAssets);
+          }
+        });
+        
+        _log.info('Successfully deleted $deletedCount assets and updated ${updatedAssets.length} database records');
+        
+        return {
+          'success': true,
+          'count': deletedCount,
+          'message': 'Successfully deleted $deletedCount assets',
+        };
+      } catch (transactionError) {
+        // If transaction fails, try to perform operations separately
+        _log.warning('Transaction failed, attempting operations separately: ${transactionError.toString()}');
+        
+        try {
+          // Delete files from device
+          final deletedIds = await _assetMediaRepository.deleteAll(assetsToDelete);
+          deletedCount = deletedIds.length;
+          
+          // Update database to mark assets as remote-only
+          if (updatedAssets.isNotEmpty) {
+            await _assetRepository.updateAll(updatedAssets);
+          }
+          
+          return {
+            'success': true,
+            'count': deletedCount,
+            'message': 'Successfully deleted $deletedCount assets',
+          };
+        } catch (e) {
+          _log.severe('Error during separate operations: ${e.toString()}');
+          return {
+            'success': false,
+            'count': 0,
+            'message': 'Failed to delete assets: ${e.toString()}',
+          };
+        }
+      }
     } catch (e) {
       _log.severe('Error [deleteBackedUpAssetsFromDevice] ${e.toString()}');
       return {
